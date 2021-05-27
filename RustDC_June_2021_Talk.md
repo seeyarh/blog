@@ -277,4 +277,142 @@ impl MmapArea {
 
 ## Performance
 
+After fixing the design issue, I wrote some logic to manage the queues and
+provided a send/recv interface, which looks like this:
+```
+// Sending a packet
+let pkt: Vec<u8> = vec![];
+xsk.tx.send(&pkt);
+
+// Receiving a packet
+let pkt: Vec<u8> = vec![];
+let len = xsk.recv(&mut pkt);
+```
+
+However, at this point I was only getting about 5 million packets per second on
+a 10Gb link. The ZMap authors claim they are able to achieve 14 million packets
+per second on a 10Gb link.
+
+### Optimizing TX
+
+![before](./before.png)
+
+The send method calls the complete frames method.
+```
+    pub fn send(&mut self, data: &[u8]) -> Result<(), XskSendError> {
+        log::debug!("tx: tx_cursor = {}", self.tx_cursor);
+
+        self.complete_frames();
+
+        if !self.tx_frames[self.tx_cursor].status.is_free() {
+            return Err(XskSendError::NoFreeTxFrames);
+        }
+
+        unsafe {
+            self.tx_frames[self.tx_cursor]
+                .write_to_umem_checked(data)
+                .expect("failed to write to umem");
+        }
+
+        self.tx_cursor = (self.tx_cursor + 1) % self.tx_frames.len();
+        self.cur_batch_size += 1;
+
+        log::debug!(
+            "tx: cur_batch_size = {}, batch_size = {}",
+            self.cur_batch_size,
+            self.batch_size
+        );
+
+        // Add consumed frames back to the tx queue
+        if self.cur_batch_size == self.batch_size {
+            self.put_batch_on_tx_queue();
+        }
+
+        Ok(())
+    }
+```
+
+put_batch_on_tx_queue
+
+```
+    fn put_batch_on_tx_queue(&mut self) {
+        log::debug!(
+            "tx: putting batch on queue: batch_size = {}, tx_cursor = {}",
+            self.batch_size,
+            self.tx_cursor
+        );
+        if self.cur_batch_size == 0 {
+            return;
+        }
+
+        let mut start = self.tx_cursor - self.cur_batch_size;
+        let mut end = self.tx_cursor;
+        if self.tx_cursor == 0 {
+            start = self.tx_frames.len() - self.cur_batch_size;
+            end = self.tx_frames.len();
+        }
+        log::debug!("tx: adding tx_frames[{}..{}] to tx queue", start, end);
+
+        for frame in self.tx_frames[start..end].iter_mut() {
+            frame.status = FrameStatus::OnTxQueue;
+        }
+
+        while unsafe {
+            self.tx_q
+                .produce_and_wakeup(&self.tx_frames[start..end])
+                .expect("failed to add frames to tx queue")
+        } != self.cur_batch_size
+        {
+            // Loop until frames added to the tx ring.
+            log::debug!(
+                "tx_q.produce_and_wakeup() failed to allocate {} frame",
+                self.cur_batch_size
+            );
+        }
+        log::debug!("tx_q.produce_and_wakeup() submitted {} frames", 1);
+
+        self.stats.pkts_tx += self.cur_batch_size as u64;
+        self.outstanding_tx_frames += self.cur_batch_size as u64;
+        self.cur_batch_size = 0;
+    }
+```
+
+This is the complete frames method:
+```
+
+    /// Read frames from completion queue
+    fn complete_frames(&mut self) -> u64 {
+        log::debug!("tx: reading from completion queue");
+        let n_free_frames = self
+            .comp_q
+            .consume(self.outstanding_tx_frames, &mut self.free_frames);
+        self.outstanding_tx_frames -= n_free_frames;
+
+        self.stats.pkts_tx_completed += n_free_frames;
+
+        if n_free_frames == 0 {
+            log::debug!("comp_q.consume() consumed 0 frames");
+            if self.tx_q.needs_wakeup() {
+                log::debug!("tx: waking up tx_q");
+                self.tx_q.wakeup().expect("failed to wake up tx queue");
+                log::debug!("tx: woke up tx_q");
+            }
+        }
+        log::debug!("tx: comp_q.consume() consumed {} frames", n_free_frames);
+
+        self.update_tx_frames(n_free_frames as usize);
+        n_free_frames
+    }
+```
+
+We are waking the kernel up twice per send call, once in the send method when
+we call produce_and_wakeup, and once in the complete frames method. Getting rid
+of this extra call in the complete_frames method gives us the 14 million
+packets per second that we're after.
+
+
+### Optimizing RX
+Using closures to avoid copies.
+
 ## C FFI
+[The Rust FFI Omnibus](http://jakegoulding.com/rust-ffi-omnibus/)
