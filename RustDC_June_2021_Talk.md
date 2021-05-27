@@ -15,6 +15,8 @@ The are two main methods for fast packet processing:
 AF_XDP is a third way: an in-kernel fast path. It is nearly as fast as kernel bypass, but it is built
 into the kernel.
 
+![https://static.sched.com/hosted_files/osseu19/48/elce-af_xdp-topel-v3.pdf](af_xdp_vs_af_packet.png)
+
 Applications in which you might need high performance packet processing:
 - Intrusion Detection, Ex. [Suricata](https://github.com/OISF/suricata)
 - L4 Load Balancing, Ex [Katran](https://github.com/facebookincubator/katran)
@@ -32,10 +34,10 @@ performance packet processing. AF_XDP is built on top of two layers of abstracti
 
 - eBPF: an in-kernel virtual machine which allows the user to load programs
   that respond events in certain kernel subsytems.
-![diagram](http://www.brendangregg.com/Perf/bcc_tracing_tools.png)
+![http://www.brendangregg.com/Perf/bcc_tracing_tools.png](http://www.brendangregg.com/Perf/bcc_tracing_tools.png)
 
 - XDP: an eBPF based networking fast path.
-![diagram](http://www.iovisor.org/wp-content/uploads/sites/8/2016/09/xdp-packet-processing-1024x560.png)
+![https://static.sched.com/hosted_files/osseu19/48/elce-af_xdp-topel-v3.pdf](xdp_diagram.png)
 
 
 ## AF_XDP and xdpsock
@@ -294,6 +296,8 @@ a 10Gb link. The ZMap authors claim they are able to achieve 14 million packets
 per second on a 10Gb link.
 
 ### Optimizing TX
+Flamegraphs are a tool to visualize where your program is spending time.
+[cargo-flamegraph](https://github.com/flamegraph-rs/flamegraph)
 
 ![before](./before.png)
 
@@ -412,7 +416,49 @@ packets per second that we're after.
 
 
 ### Optimizing RX
-Using closures to avoid copies.
+Now that we have optimized the TX path, we have a new problem: the RX path
+can't keep up. My first attempt at the receive function looked something like
+this:
+```
+    pub fn recv(&mut self, pkt_receiver: &mut [u8]) -> usize {
+```
+This method receives a packet on the RX Queue and copies it into the
+pkt_receiver slice. There are two problems from this from a performance
+perspective:
+- We are doing an additional copy for each packet received.
+- When we read from the RX queue, we might read multiple packets. However, each
+  call to `recv` only handles one packet. If the received packets are grouping
+  together due to the sender sending batches or traffic shaping of a network
+  device, we will fall behind.
+
+Thankfully, we can use a closure to operate on the received packet in place.
+```
+    pub fn recv_apply<F>(&mut self, f: F)
+    where
+        F: FnMut(&[u8]),
+    {
+    ...
+        if n_frames_recv > 0 {
+            self.apply_batch(n_frames_recv, f);
+        }
+    ...
+    }
+
+    fn apply_batch<F>(&mut self, n_frames_recv: usize, mut f: F)
+    where
+        F: FnMut(&[u8]),
+    {
+    ...
+
+        for filled_frame in filled_frames {
+
+            let data = unsafe { filled_frame.read_from_umem(frame.len()) };
+            f(data);
+        }
+    ...
+    }
+```
+This solves both problems outlined above.
 
 ## C FFI
 [The Rust FFI Omnibus](http://jakegoulding.com/rust-ffi-omnibus/)
