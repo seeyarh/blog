@@ -9,34 +9,46 @@ which we send and receive packets to and from the kernel.
 
 ## Fast Packet Processing
 The are two main methods for fast packet processing:
+
 - AF_PACKET, slow but easy to use
 - Kernel Bypass (DPDK, Netmap, PF_RING), fast but hard to use
 
+## AF_XDP
 AF_XDP is a third way: an in-kernel fast path. It is nearly as fast as kernel bypass, but it is built
 into the kernel.
 
 ![https://static.sched.com/hosted_files/osseu19/48/elce-af_xdp-topel-v3.pdf](af_xdp_vs_af_packet.png)
 
+## Applications
 Applications in which you might need high performance packet processing:
+
 - Intrusion Detection, Ex. [Suricata](https://github.com/OISF/suricata)
 - L4 Load Balancing, Ex [Katran](https://github.com/facebookincubator/katran)
 - Quickly scanning the Internet, Ex. [ZMap](https://github.com/zmap/zmap)
 
+## Zmap
 ZMap already provides [high performance scanning using
-PF_RING](https://github.com/zmap/zmap/blob/master/10gigE.md). However, to use
-PF_RING, you have to buy [a license that costs $150 per network
-interface](https://shop.ntop.org/). Since I'm too stingy to shell out for a
-PF_RING license, I set out to use AF_XDP to send packets with ZMap.
+PF_RING](https://github.com/zmap/zmap/blob/master/10gigE.md).
+
+However, to use PF_RING, you have to buy [a license that costs $150 per network
+interface](https://shop.ntop.org/).
+
+Since I'm too stingy to shell out for a PF_RING license, I set out to use
+AF_XDP to send packets with ZMap.
 
 ## AF_XDP
 AF_XDP is an address family that is optimized for high
 performance packet processing. AF_XDP is built on top of two layers of abstraction
 
-- eBPF: an in-kernel virtual machine which allows the user to load programs
+## eBPF
+eBPF: an in-kernel virtual machine which allows the user to load programs
   that respond events in certain kernel subsytems.
+
 ![http://www.brendangregg.com/Perf/bcc_tracing_tools.png](http://www.brendangregg.com/Perf/bcc_tracing_tools.png)
 
-- XDP: an eBPF based networking fast path.
+## XDP
+XDP: an eBPF based networking fast path.
+
 ![https://static.sched.com/hosted_files/osseu19/48/elce-af_xdp-topel-v3.pdf](xdp_diagram.png)
 
 
@@ -45,6 +57,8 @@ performance packet processing. AF_XDP is built on top of two layers of abstracti
 In order to use AF_XDP, you must set up shared data structures between your
 userspace application and the kernel.
 
+## AF_XDP and xdpsock
+\tiny
 ```
                       ┌───────────────────┐
                       │    UMEM Region    │
@@ -75,6 +89,9 @@ userspace application and the kernel.
     └──────────┘      │      Frame N      │       └──────────┘
                       └───────────────────┘
 ```
+\normalsize
+
+## AF_XDP and xdpsock
 
 The UMEM region is a region of memory shared between userspace and the kernel.
 It is broken up into frame descriptors, which have an address that is the
@@ -160,8 +177,10 @@ impl Umem<'_> {
 }
 ```
 
+## Ownership Diagram
 We can represent this with the following ownership diagram (Solid lines
 represent ownership, dashed lines represent references).
+\tiny
 ```
 
       ┌────────────┐                               ┌─────────┐
@@ -190,13 +209,20 @@ represent ownership, dashed lines represent references).
       │            │
       └────────────┘
 ```
+\normalsize
+
+## Issue with existing ownership
 All the writes to the UMEM region must go through this single Umem struct. We need a mutable reference to the Umem struct for the TX path. We can't share the Umem struct without wrapping it in a mutex, which would be likely be bad for performance.
 
 This design isn't a problem in C. Since each write to portion of the Umem region goes through a frame descriptor, you could divy up the frame descriptors and hand them out to multiple threads, along with a pointer to the Umem region. If you did this correctly, you would be able to send and receive packets from multiple threads without data races.
 
-However, this isn't going to work in Rust.
+However, this isn't going to work in Rust. As an analogy, consider operating on two different slices of a Vec from two different threads. 
+
 Instead, we want each frame to own it's portion of the Umem.
 We would like the following ownership diagram:
+
+## Revised Ownership Diagram
+\tiny
 ```
 
   ┌────────────┐        ┌────────────┐
@@ -225,6 +251,7 @@ We would like the following ownership diagram:
   │            ├────────▶            │
   └────────────┘        └────────────┘
 ```
+\normalsize
 
 ## Unsafe Escape Hatch
 
@@ -295,12 +322,13 @@ However, at this point I was only getting about 5 million packets per second on
 a 10Gb link. The ZMap authors claim they are able to achieve 14 million packets
 per second on a 10Gb link.
 
-### Optimizing TX
+## Optimizing TX
 Flamegraphs are a tool to visualize where your program is spending time.
 [cargo-flamegraph](https://github.com/flamegraph-rs/flamegraph)
 
 ![before](./before.png)
 
+## Send method unoptimized
 The send method calls the complete frames method.
 ```
     pub fn send(&mut self, data: &[u8]) -> Result<(), XskSendError> {
@@ -336,7 +364,7 @@ The send method calls the complete frames method.
     }
 ```
 
-put_batch_on_tx_queue
+## put_batch_on_tx_queue
 
 ```
     fn put_batch_on_tx_queue(&mut self) {
@@ -381,7 +409,7 @@ put_batch_on_tx_queue
     }
 ```
 
-This is the complete frames method:
+## complete frames method:
 ```
 
     /// Read frames from completion queue
@@ -409,13 +437,14 @@ This is the complete frames method:
     }
 ```
 
+## Performance issue explained
 We are waking the kernel up twice per send call, once in the send method when
 we call produce_and_wakeup, and once in the complete frames method. Getting rid
 of this extra call in the complete_frames method gives us the 14 million
 packets per second that we're after.
 
 
-### Optimizing RX
+## Optimizing RX
 Now that we have optimized the TX path, we have a new problem: the RX path
 can't keep up. My first attempt at the receive function looked something like
 this:
