@@ -70,7 +70,10 @@ Applications in which you might need high performance packet processing:
 - L4 Load Balancing, Ex [Katran](https://github.com/facebookincubator/katran)
 - Quickly scanning the Internet, Ex. [ZMap](https://github.com/zmap/zmap)
 
-## Zmap
+## How to Scan 0.0.0.0/0 - TCP
+![SYN](./TCP_SYN_tweet.png)
+
+## How to Scan 0.0.0.0/0 - TCP
 
 \small
 ```
@@ -340,11 +343,13 @@ Too slow
 
 Should be able to get 14 million pps, only getting 5 million pps
 
+![before](./xdpsock-tx-perf-before.png)
+
 ## Optimizing TX
 Flamegraphs are a tool to visualize where your program is spending time.
 [cargo-flamegraph](https://github.com/flamegraph-rs/flamegraph)
 
-![before](./before.png)
+![before](./flamegraph-xdpsock-tx-before.svg)
 
 ## Send method unoptimized
 The send method calls the complete frames method.
@@ -399,12 +404,19 @@ The send method calls the complete frames method.
 ```
 \normalsize
 
+
 ## Optimizing TX
-![after](./after.png)
+![after](./xdpsock-tx-perf-after.png)
+
+## Optimizing TX
+![after](./flamegraph-xdpsock-tx-after.svg)
 
 ## Optimizing RX
 Now that we have optimized the TX path, we have a new problem: the RX path
 can't keep up.
+
+We are missing 7,809,875 packets out of 10,000,000 packets, or 78%.
+![after](./xdpsock-tx-perf-after.png)
 
 ## Optimizing RX
 
@@ -500,6 +512,11 @@ where
 }
 ```
 \normalsize
+
+## Optimizing RX: avoiding copies
+
+Now we are only missing 403,862 packets out of 10,000,000 packets, or 4%.
+![after](./xdpsock-rx-perf-after.png)
 
 ## C FFI
 [The Rust FFI Omnibus](http://jakegoulding.com/rust-ffi-omnibus/)

@@ -216,7 +216,7 @@ All the writes to the UMEM region must go through this single Umem struct. We ne
 
 This design isn't a problem in C. Since each write to portion of the Umem region goes through a frame descriptor, you could divy up the frame descriptors and hand them out to multiple threads, along with a pointer to the Umem region. If you did this correctly, you would be able to send and receive packets from multiple threads without data races.
 
-However, this isn't going to work in Rust. As an analogy, consider operating on two different slices of a Vec from two different threads. 
+However, this isn't going to work in Rust. As an analogy, consider operating on two different slices of a Vec from two different threads.
 
 Instead, we want each frame to own it's portion of the Umem.
 We would like the following ownership diagram:
@@ -303,6 +303,53 @@ impl MmapArea {
 ...
 }
 ```
+
+## Performance Test Setup
+
+
+https://github.com/seeyarh/xdpsock/blob/master/examples/dev_to_dev.rs
+```
+
+  ┌───────────────────────┐                 ┌───────────────────────┐
+  │                       │                 │                       │
+  │                       │                 │                       │
+  │                       │                 │                       │
+  │       TX Server       │                 │       RX Server       │
+  │                       │─────────────────▶                       │
+  │                       │                 │                       │
+  │                       │                 │                       │
+  │                       │                 │                       │
+  └───────────────────────┘                 └───────────────────────┘
+```
+
+I'm running the setup shown above on Equinix Metal Servers. These are
+bare-metal servers with Mellanox 10Gbe NICs. By default, the servers have two
+interfaces that are bonded. In order to create the setup shown above, we must
+use [Hybrid Unbonded
+Mode](https://metal.equinix.com/developers/docs/layer2-networking/hybrid-unbonded-mode/).
+
+To configure your servers, follow the instructions here:
+https://metal.equinix.com/developers/docs/layer2-networking/hybrid-unbonded-mode/
+. Configure your servers so that the TX and RX servers have distinct IP
+addresses. Place both servers on the same VLAN.
+
+Install dependencies
+```
+sudo apt update
+sudo apt-get install -y libelf-dev clang \
+    linux-tools-common linux-tools-generic \
+    ethtool
+```
+
+Compile
+
+Configure NIC
+```
+ethtool -L enp2s0f1 combined 1
+ethtool -N enp2s0f1 flow-type udp4 dst-port 4321 action 1
+```
+
+
 
 ## Performance
 
@@ -446,7 +493,11 @@ packets per second that we're after.
 
 ## Optimizing RX
 Now that we have optimized the TX path, we have a new problem: the RX path
-can't keep up. My first attempt at the receive function looked something like
+can't keep up.
+
+We are missing 7,809,875 packets out of 10,000,000 packets, or 78%.
+
+My first attempt at the receive function looked something like
 this:
 ```
     pub fn recv(&mut self, pkt_receiver: &mut [u8]) -> usize {
@@ -487,7 +538,7 @@ Thankfully, we can use a closure to operate on the received packet in place.
     ...
     }
 ```
-This solves both problems outlined above.
+Now we are only missing 403,862 packets out of 10,000,000 packets, or 4%.
 
 ## C FFI
 [The Rust FFI Omnibus](http://jakegoulding.com/rust-ffi-omnibus/)
