@@ -10,8 +10,8 @@
   │            │        │            │
   ├────────────┤        ├────────────┤
   │            │        │            │
-  │   Frame    │        │            │
-  │Descriptors │        │ Mmap Area  │
+  │   Frame    │        │ Umem/Mmap  │
+  │Descriptors │        │    Area    │
   ├────────────┤        ├────────────┤
   │            │        │            │
   │            ├────────▶            │

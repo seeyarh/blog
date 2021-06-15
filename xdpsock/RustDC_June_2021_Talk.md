@@ -6,8 +6,40 @@ header-includes:
     - \usepackage{setspace}
 ---
 ## Motivation
-I'm interested in scanning the internet as fast as possible.
+I'm interested in scanning the internet.
 
+## How to Scan 0.0.0.0/0 - TCP
+![SYN](./TCP_SYN_tweet.png)
+
+## How to Scan 0.0.0.0/0 - TCP
+
+\small
+```
+   ┌─────────┐                 ┌─────────┐
+   │ Client  │                 │ Server  │
+   └─────────┘                 └─────────┘
+        │                           │    ┌────────────┐
+        │────────────SYN───────────▶│    │ Packet #0  │
+        │                           │    └────────────┘
+        │                           │
+        │                           │    ┌────────────┐
+        │◀──────────SYNACK──────────│    │ Packet #1  │
+        │                           │    └────────────┘
+        │                           │
+        │                           │    ┌────────────┐
+        │────────────ACK───────────▶│    │ Packet #2  │
+        │                           │    └────────────┘
+        │                           │
+        │                           │    ┌────────────┐
+        ├────────────Data──────────▶│    │ Packet #3  │
+        │                           │    └────────────┘
+```
+\normalsize
+
+## Zmap
+Sends TCP SYN packets, listens for SYNACK to determine open ports.
+
+## Speed Matters
 - There are 4,294,967,296 IPv4 Addresses
 - Scanning all of IPv4 at 100,000 packets per second takes 12 hours
 - Scanning all of IPv4 at 1,000,000 per second takes 71 minutes
@@ -50,6 +82,10 @@ The are two main methods for fast packet processing:
 - In-Kernel: AF_PACKET, in kernel, slow but easy to use
 - Kernel Bypass (DPDK, Netmap, PF_RING), fast but hard to use
 
+## Zmap
+- AF_PACKET by default
+- PF_RING if you buy a license
+
 ## AF_XDP
 AF_XDP is a third way: an in-kernel fast path. It is nearly as fast as kernel bypass, but it is built
 into the kernel.
@@ -63,53 +99,6 @@ Imagine going to the airport
 - Kernel bypass is like showing up to the airport and getting on a private jet
 - AF_XDP is like TSA Precheck
 
-## Applications
-Applications in which you might need high performance packet processing:
-
-- Intrusion Detection, Ex. [Suricata](https://github.com/OISF/suricata)
-- L4 Load Balancing, Ex [Katran](https://github.com/facebookincubator/katran)
-- Quickly scanning the Internet, Ex. [ZMap](https://github.com/zmap/zmap)
-
-## How to Scan 0.0.0.0/0 - TCP
-![SYN](./TCP_SYN_tweet.png)
-
-## How to Scan 0.0.0.0/0 - TCP
-
-\small
-```
-   ┌─────────┐                 ┌─────────┐
-   │ Client  │                 │ Server  │
-   └─────────┘                 └─────────┘
-        │                           │    ┌────────────┐
-        │────────────SYN───────────▶│    │ Packet #0  │
-        │                           │    └────────────┘
-        │                           │
-        │                           │    ┌────────────┐
-        │◀──────────SYNACK──────────│    │ Packet #1  │
-        │                           │    └────────────┘
-        │                           │
-        │                           │    ┌────────────┐
-        │────────────ACK───────────▶│    │ Packet #2  │
-        │                           │    └────────────┘
-        │                           │
-        │                           │    ┌────────────┐
-        ├────────────Data──────────▶│    │ Packet #3  │
-        │                           │    └────────────┘
-```
-\normalsize
-
-## Zmap
-Sends TCP SYN packets, listens for SYNACK to determine open ports.
-
-## Zmap
-ZMap already provides [high performance scanning using
-PF_RING](https://github.com/zmap/zmap/blob/master/10gigE.md).
-
-However, to use PF_RING, you have to buy [a license that costs $150 per network
-interface](https://shop.ntop.org/).
-
-Since I'm too stingy to shell out for a PF_RING license, I set out to use
-AF_XDP to send packets with ZMap.
 
 ## AF_XDP
 AF_XDP is an address family that is optimized for high
@@ -118,6 +107,16 @@ performance packet processing. AF_XDP is built on top of two layers of abstracti
 - XDP
 
 ![https://static.sched.com/hosted_files/osseu19/48/elce-af_xdp-topel-v3.pdf](xdp_diagram.png){ height=256px }
+
+## AF_XDP components
+- 2 queues for TX: the TX Queue and Completion Queue
+- 2 queues for RX: the RX Queue and Fill Queue
+- 1 region of memory called the UMEM, shared between userspace and the kernel.
+
+## UMEM and MMAP
+We need to allocate a big block of memory to use AF_XDP. The best way to do this is with mmap.
+
+https://man7.org/linux/man-pages/man2/mmap.2.html
 
 
 ## AF_XDP and xdpsock
@@ -197,7 +196,6 @@ We can represent this with the following ownership diagram (Solid lines
 represent ownership, dashed lines represent references).
 \tiny
 ```
-
       ┌────────────┐                               ┌─────────┐
       │            │                               │         │
       │            │                               │         │
@@ -229,7 +227,6 @@ represent ownership, dashed lines represent references).
 ## Revised Ownership Diagram
 \tiny
 ```
-
   ┌────────────┐        ┌────────────┐
   │            ├────────▶            │
   │            │        │            │
@@ -241,8 +238,8 @@ represent ownership, dashed lines represent references).
   │            │        │            │
   ├────────────┤        ├────────────┤
   │            │        │            │
-  │   Frame    │        │            │
-  │Descriptors │        │ Mmap Area  │
+  │   Frame    │        │ Umem/Mmap  │
+  │Descriptors │        │    Area    │
   ├────────────┤        ├────────────┤
   │            │        │            │
   │            ├────────▶            │
@@ -258,8 +255,12 @@ represent ownership, dashed lines represent references).
 ```
 \normalsize
 
-## Unsafe Escape Hatch
 
+## Unsafe
+
+Each frame holds an Arc to the Umem region and constructs it's corresponding slice of bytes using a call to `slice::from_raw_parts_mut`.
+
+## Unsafe
 \small
 ```
 pub struct Frame<'umem> {
@@ -273,7 +274,7 @@ pub struct Frame<'umem> {
 ```
 \normalsize
 
-## Unsafe Escape Hatch
+## Unsafe
 \small
 ```
 impl Frame {
@@ -285,7 +286,7 @@ impl Frame {
 ```
 \normalsize
 
-## Unsafe Escape Hatch
+## Unsafe
 \small
 ```
 ...
@@ -314,7 +315,7 @@ let pkt: Vec<u8> = vec![];
 xsk.tx.send(&pkt);
 
 // Receiving a packet
-let pkt: Vec<u8> = vec![];
+let mut pkt: Vec<u8> = vec![];
 let len = xsk.recv(&mut pkt);
 ```
 
@@ -521,21 +522,35 @@ Now we are only missing 403,862 packets out of 10,000,000 packets, or 4%.
 ## C FFI
 [The Rust FFI Omnibus](http://jakegoulding.com/rust-ffi-omnibus/)
 
+http://jakegoulding.com/rust-ffi-omnibus/
+
 ## C FFI
-\small
+\tiny
 ```
 #[no_mangle]
-pub extern "C" fn xsk_new<'a>(ifname: *const c_char) -> *mut Xsk2<'a> {
-    let ifname = unsafe {
+pub unsafe extern "C" fn xsk_new(ifname: *const c_char) -> *mut Xsk2 {
+    let ifname = {
         assert!(!ifname.is_null());
         CStr::from_ptr(ifname)
     };
 
     let ifname = ifname.to_str().unwrap();
+    let umem_config = UmemConfigBuilder::new()
+        ...
+    let socket_config = SocketConfigBuilder::new()
+        ...
+    let n_tx_frames = umem_config.frame_count() / 2;
+    let n_tx_batch_size = 1024;
 
-    let mut xsk = Xsk2::new(&ifname, 0,
-        umem_config, socket_config, n_tx_frames as usize);
-
+    let xsk = Xsk2::new(
+        &ifname,
+        0,
+        umem_config,
+        socket_config,
+        n_tx_frames as usize,
+        n_tx_batch_size,
+    )
+    .expect("failed to build xsk");
     Box::into_raw(Box::new(xsk))
 }
 ```
@@ -544,20 +559,20 @@ pub extern "C" fn xsk_new<'a>(ifname: *const c_char) -> *mut Xsk2<'a> {
 \small
 ```
 #[no_mangle]
-pub extern "C" fn xsk_send(xsk_ptr: *mut Xsk2,
+pub unsafe extern "C" fn xsk_send(xsk_ptr: *mut Xsk2,
     pkt: *const u8, len: size_t) {
 
-    let xsk = unsafe {
+    let xsk = {
         assert!(!xsk_ptr.is_null());
         &mut *xsk_ptr
     };
 
-    let pkt = unsafe {
+    let pkt = {
         assert!(!pkt.is_null());
         slice::from_raw_parts(pkt, len as usize)
     };
 
-    xsk.send(&pkt);
+    xsk.tx.send(&pkt).expect("failed to send pkt");
 }
 ```
 
@@ -565,42 +580,57 @@ pub extern "C" fn xsk_send(xsk_ptr: *mut Xsk2,
 \small
 ```
 #[no_mangle]
-pub extern "C" fn xsk_recv(xsk_ptr: *mut Xsk2,
-    pkt: *mut u8, len: size_t) {
+pub unsafe extern "C" fn xsk_recv(xsk_ptr: *mut Xsk2,
+    pkt: *mut u8, len: size_t) -> u16 {
 
-    let xsk = unsafe {
+    let xsk = {
         assert!(!xsk_ptr.is_null());
         &mut *xsk_ptr
     };
 
-    let mut pkt = unsafe {
+    let pkt = {
         assert!(!pkt.is_null());
         slice::from_raw_parts_mut(pkt, len as usize)
     };
 
-    let (recvd_pkt, len) = xsk.recv().expect("failed to recv");
-    pkt[..len].clone_from_slice(&recvd_pkt[..len]);
+    xsk.rx.recv(pkt) as u16
 }
 ```
+
 ## C FFI
-\small
+\tiny
 ```
-char* ifname = "veth0";
-void* xsk = xsk_new(ifname);
-...
+int main() {
+    char* ifname = "veth0";
+    void* xsk = xsk_new(ifname);
+    uint16_t len_recvd;
 
-for(i = 0; i < pkts_to_recv; i++) {
-    char buf[MAX_PKT_SIZE] = {0};
-    xsk_recv(xsk, &buf, len);
+    int i, j;
+    int pkts_to_recv = 10;
+    size_t len = 1500;
+
+
+    for(i = 0; i < pkts_to_recv; i++) {
+        char buf[MAX_PKT_SIZE] = {0};
+        len_recvd = xsk_recv(xsk, &buf, len);
+        for(j = 0; j < len_recvd; j++) {
+            printf("0x%hhx,", buf[j]);
+        }
+        printf("\n");
+    }
+
+    char pkt_to_send[50] = {...};
+
+
+    for(i = 0; i < pkts_to_recv; i++) {
+        xsk_send(xsk, &pkt_to_send, 50);
+    }
+
+
+    xsk_delete(xsk);
+    return 0;
 }
-
-
-...
-
-for(i = 0; i < pkts_to_send; i++) {
-    xsk_send(xsk, &pkt_to_send, 50);
-}
-
-...
-xsk_delete(xsk);
 ```
+
+## C FFI
+https://github.com/seeyarh/zmap/tree/feature/af_xdp

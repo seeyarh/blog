@@ -3,28 +3,122 @@ I'm interested in scanning the internet. That is, finding all hosts with a
 specific port open, running a specific service, vulnerable to a certain
 exploit, etc..
 
-When scanning the internet, the question quickly arises: how
-fast can I scan?  In order to scan quickly, we need to consider the method by
+Finding open ports is the first step in scanning the internet.
+
+When you want to run a service (webserver, irc server, ftp server) that other people on the internet can connect to as clients, you need two things: an IP address and an open port.
+
+An IP address uniquely a machine on the internet (home address). A port
+identifies a service running on that machine. Ports are assigned to different
+services. HTTP runs on port 80, HTTPS on port 443, SSH on port 22.
+
+To find open ports, we need to know a little bit about how TCP works.
+![SYN](./TCP_SYN_tweet.png)
+
+TCP is a reliable transport layer protocol. It begins with a three way handshake:
+
+```
+   ┌─────────┐                 ┌─────────┐
+   │ Client  │                 │ Server  │
+   └─────────┘                 └─────────┘
+        │                           │    ┌────────────┐
+        │────────────SYN───────────▶│    │ Packet #0  │
+        │                           │    └────────────┘
+        │                           │
+        │                           │    ┌────────────┐
+        │◀──────────SYNACK──────────│    │ Packet #1  │
+        │                           │    └────────────┘
+        │                           │
+        │                           │    ┌────────────┐
+        │────────────ACK───────────▶│    │ Packet #2  │
+        │                           │    └────────────┘
+        │                           │
+        │                           │    ┌────────────┐
+        ├────────────Data──────────▶│    │ Packet #3  │
+        │                           │    └────────────┘
+```
+
+The tool of choice for quickly finding all open ports on a bunch of IP addresses is ZMap. ZMap operates by sending SYN packets and listening for SYNACK packets to determine open ports.
+
+When scanning the internet, speed matters.
+- There are 4,294,967,296 IPv4 Addresses
+- Scanning all of IPv4 at 100,000 packets per second takes 12 hours
+- Scanning all of IPv4 at 1,000,000 per second takes 71 minutes
+- Scanning all of IPv4 at 10,000,000 packets per second takes 7 minutes
+
+
+In order to scan quickly, we need to consider the method by
 which we send and receive packets to and from the kernel.
+
+## OS/Kernel Review
+Usually, when sending or receiving packets, we interact with our network hardware through the OS kernel via system calls
+
+As a client, we call socket, connect to connect to a remote server.
+
+https://man7.org/linux/man-pages/man2/socket.2.html
+
+https://man7.org/linux/man-pages/man2/bind.2.html
+
+https://man7.org/linux/man-pages/man2/connect.2.html
+
+https://man7.org/linux/man-pages/man2/recvfrom.2.html
+
+https://man7.org/linux/man-pages/man2/send.2.html
+
+```
+    ┌──────────────────────────────────────────────┐
+    │                  Userspace                   │
+    └──────────────────────────────────────────────┘
+
+  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐
+  │ Application  │  │ Application  │  │ Application  │
+  │ (Ex. Chrome) │  │ (Ex. Photos) │  │(Ex. Terminal)│
+  └──────────────┘  └──────────────┘  └──────────────┘
+          │                 │                 │
+          │                 │                 │
+─ ─ ─ Syscall ─ ─ ─ ─ ─ Syscall ─ ─ ─ ─ ─ Syscall ─ ─ ─ ─
+          │                 │                 │
+          ▼                 ▼                 ▼
+    ┌──────────────────────────────────────────────┐
+    │                    Kernel                    │
+    └──────┬─────────────────────────────────┬─────┘
+           │                │                │
+           │                │                │
+           │                │                │
+           ▼                ▼                ▼
+    ┌──────────────┐   ┌───────────┐   ┌───────────┐
+    │   Network    │   │ Hardrive  │   │    RAM    │
+    │Interface Card│   │           │   │           │
+    └──────────────┘   └───────────┘   └───────────┘
+```
+
+If we want to go faster, we have to use different methods.
+
 
 ## Fast Packet Processing
 The are two main methods for fast packet processing:
 
-- AF_PACKET, slow but easy to use
-- Kernel Bypass (DPDK, Netmap, PF_RING), fast but hard to use
+AF_PACKET as an address family that gives the userspace application access to raw ethernet frames. This avoids the overhead of maintaining state for TCP connections. However, there is still overhead from the socket buffer and traffic control components, making system calls that copy packets from userspace to the kernel.
+
+Kernel Bypass (DPDK, Netmap, PF_RING) techniques give the userspace appliation
+direct access to the NIC. These methods can send and receive packets very
+quickly. However, they are more difficult to use as you must load a kernel
+module in order to bypass the kernel networking stack.
+
+## Zmap
+ZMap uses AF_PACKET by default, and gives the user the option to use PF_RING
+for [high performance scanning
+](https://github.com/zmap/zmap/blob/master/10gigE.md).
+
+However, to use PF_RING, you have to buy [a license that costs $150 per network
+interface](https://shop.ntop.org/).
+
+Since I'm too stingy to shell out for a PF_RING license, I set out to find another way.
 
 ## AF_XDP
-AF_XDP is a third way: an in-kernel fast path. It is nearly as fast as kernel bypass, but it is built
+[AF_XDP](https://www.kernel.org/doc/html/latest/networking/af_xdp.html) is a third way: an in-kernel fast path. It is nearly as fast as kernel bypass, but it is built
 into the kernel.
 
 ![https://static.sched.com/hosted_files/osseu19/48/elce-af_xdp-topel-v3.pdf](af_xdp_vs_af_packet.png)
-
-## Applications
-Applications in which you might need high performance packet processing:
-
-- Intrusion Detection, Ex. [Suricata](https://github.com/OISF/suricata)
-- L4 Load Balancing, Ex [Katran](https://github.com/facebookincubator/katran)
-- Quickly scanning the Internet, Ex. [ZMap](https://github.com/zmap/zmap)
 
 ## Zmap
 ZMap already provides [high performance scanning using
@@ -51,11 +145,33 @@ XDP: an eBPF based networking fast path.
 
 ![https://static.sched.com/hosted_files/osseu19/48/elce-af_xdp-topel-v3.pdf](xdp_diagram.png)
 
-
-## AF_XDP and xdpsock
+## AF_XDP
 
 In order to use AF_XDP, you must set up shared data structures between your
 userspace application and the kernel.
+
+## AF_XDP components
+- 2 queues for TX: the TX Queue and Completion Queue
+- 2 queues for RX: the RX Queue and Fill Queue
+- 1 region of memory called the UMEM, shared between userspace and the kernel.
+
+## UMEM and MMAP
+We need to allocate a big block of memory to use AF_XDP. Can't allocate this on
+the stack as it would be too big. We don't want to allocate this on the heap as
+it would lead to fragmentation. The best way to do this is with mmap.
+
+https://man7.org/linux/man-pages/man2/mmap.2.html
+
+mmap() creates a new mapping in the virtual address space of the calling process.
+
+Usually, mmap() is used to map a file into memory, so that the file contents can be manipulated as if they were memory locations.
+
+MAP_ANONYMOUS:
+The mapping is not backed by any file; its contents are
+initialized to zero.
+
+MMAP_ANONYMOUS gives us a big block of memory, separate from the stack and
+heap, that we can use for any purpose.
 
 ## AF_XDP and xdpsock
 \tiny
@@ -180,9 +296,7 @@ impl Umem<'_> {
 ## Ownership Diagram
 We can represent this with the following ownership diagram (Solid lines
 represent ownership, dashed lines represent references).
-\tiny
 ```
-
       ┌────────────┐                               ┌─────────┐
       │            │                               │         │
       │            │                               │         │
@@ -209,22 +323,22 @@ represent ownership, dashed lines represent references).
       │            │
       └────────────┘
 ```
-\normalsize
 
 ## Issue with existing ownership
 All the writes to the UMEM region must go through this single Umem struct. We need a mutable reference to the Umem struct for the TX path. We can't share the Umem struct without wrapping it in a mutex, which would be likely be bad for performance.
 
 This design isn't a problem in C. Since each write to portion of the Umem region goes through a frame descriptor, you could divy up the frame descriptors and hand them out to multiple threads, along with a pointer to the Umem region. If you did this correctly, you would be able to send and receive packets from multiple threads without data races.
 
-However, this isn't going to work in Rust. As an analogy, consider operating on two different slices of a Vec from two different threads.
+However, this isn't going to work in Rust.
+
+As an analogy, consider operating on two different slices of a Vec from two different threads. The original design was akin to trying to manipulate two slices of a vec by splitting the indices into two ranges, passing those ranges to each thread, then giving both threads a mutable reference to the vec. Obviously, that isn't going to work.
+
 
 Instead, we want each frame to own it's portion of the Umem.
 We would like the following ownership diagram:
 
 ## Revised Ownership Diagram
-\tiny
 ```
-
   ┌────────────┐        ┌────────────┐
   │            ├────────▶            │
   │            │        │            │
@@ -236,8 +350,8 @@ We would like the following ownership diagram:
   │            │        │            │
   ├────────────┤        ├────────────┤
   │            │        │            │
-  │   Frame    │        │            │
-  │Descriptors │        │ Mmap Area  │
+  │   Frame    │        │ Umem/Mmap  │
+  │Descriptors │        │    Area    │
   ├────────────┤        ├────────────┤
   │            │        │            │
   │            ├────────▶            │
@@ -251,11 +365,10 @@ We would like the following ownership diagram:
   │            ├────────▶            │
   └────────────┘        └────────────┘
 ```
-\normalsize
 
 ## Unsafe Escape Hatch
 
-I was unable to get this to work without resorting to unsafe. Instead, each frame holds an Arc to the Umem region and constructs it's corresponding slice of bytes using a call to `slice::from_raw_parts_mut`.
+Each frame holds an Arc to the Umem region and constructs it's corresponding slice of bytes using a call to `slice::from_raw_parts_mut`.
 
 ```
 pub struct Frame<'umem> {
@@ -304,10 +417,26 @@ impl MmapArea {
 }
 ```
 
+## Simplifying the API
+
+```
+// Sending a packet
+let pkt: Vec<u8> = vec![];
+xsk.tx.send(&pkt);
+
+// Receiving a packet
+let mut pkt: Vec<u8> = vec![];
+let len = xsk.recv(&mut pkt);
+```
+
 ## Performance Test Setup
 
 
 https://github.com/seeyarh/xdpsock/blob/master/examples/dev_to_dev.rs
+
+The TX Server sends UDP packets with payloads numbered 1 through N. The RX server receives the packets
+
+
 ```
 
   ┌───────────────────────┐                 ┌───────────────────────┐
@@ -349,23 +478,63 @@ ethtool -L enp2s0f1 combined 1
 ethtool -N enp2s0f1 flow-type udp4 dst-port 4321 action 1
 ```
 
+Start TX
+```
+src_ip="192.168.1.2"
+src_port=1234
+dest_port=4321
+dest_ip="192.168.1.3"
+dev=enp2s0f1
+src_mac="b8:ce:f6:0e:59:33"
+dest_mac="0c:42:a1:8f:96:9b"
 
+queues="1"
+n_pkts=10000000
+socket_option=drv
+bind_option=zero-copy
+batch_size=2048
+timeout=30
+
+flamegraph ./target/release/examples/dev_to_dev \
+    --src-ip $src_ip \
+    --src-port $src_port \
+    --dest-ip $dest_ip \
+    --dest-port $dest_port \
+    --dev $dev \
+    --src-mac $src_mac \
+    --dest-mac $dest_mac \
+    --queues $queues \
+    -t $timeout \
+    -n $n_pkts \
+    --socket-option $socket_option \
+    --bind-option $bind_option \
+    --batch-size $batch_size \
+    tx
+```
+
+Start RX
+```
+
+flamegraph ./target/release/examples/dev_to_dev \
+    --src-ip $src_ip \
+    --src-port $src_port \
+    --dest-ip $dest_ip \
+    --dest-port $dest_port \
+    --dev $dev \
+    --src-mac $src_mac \
+    --dest-mac $dest_mac \
+    --queues $queues \
+    -t $timeout \
+    -n $n_pkts \
+    --socket-option $socket_option \
+    --bind-option $bind_option \
+    --batch-size $batch_size \
+    rx
+```
 
 ## Performance
 
-After fixing the design issue, I wrote some logic to manage the queues and
-provided a send/recv interface, which looks like this:
-```
-// Sending a packet
-let pkt: Vec<u8> = vec![];
-xsk.tx.send(&pkt);
-
-// Receiving a packet
-let pkt: Vec<u8> = vec![];
-let len = xsk.recv(&mut pkt);
-```
-
-However, at this point I was only getting about 5 million packets per second on
+At this point I was only getting about 5 million packets per second on
 a 10Gb link. The ZMap authors claim they are able to achieve 14 million packets
 per second on a 10Gb link.
 
@@ -485,7 +654,12 @@ The send method calls the complete frames method.
 ```
 
 ## Performance issue explained
-We are waking the kernel up twice per send call, once in the send method when
+In order to tell the kernel to send packets, we have to do three things:
+- write to frames in the umem region
+- put frames on the tx queue
+- wake the kernel up with a system call
+
+The issue is, we are waking the kernel up twice per send call, once in the send method when
 we call produce_and_wakeup, and once in the complete frames method. Getting rid
 of this extra call in the complete_frames method gives us the 14 million
 packets per second that we're after.
@@ -538,7 +712,125 @@ Thankfully, we can use a closure to operate on the received packet in place.
     ...
     }
 ```
-Now we are only missing 403,862 packets out of 10,000,000 packets, or 4%.
+Now we are only missing 403,862 packets out of 10,000,000 packets, or 4%. This is still not great.
+
+There are a few possible solutions to our RX performance issues.
+- Scale out by NIC queue, use 5 tuple hash plus queue round-robining
+- Speed up the parser
+- Scale out the parser to multiple threads
 
 ## C FFI
 [The Rust FFI Omnibus](http://jakegoulding.com/rust-ffi-omnibus/)
+
+http://jakegoulding.com/rust-ffi-omnibus/
+
+## C FFI
+\tiny
+```
+#[no_mangle]
+pub unsafe extern "C" fn xsk_new(ifname: *const c_char) -> *mut Xsk2 {
+    let ifname = {
+        assert!(!ifname.is_null());
+        CStr::from_ptr(ifname)
+    };
+
+    let ifname = ifname.to_str().unwrap();
+    let umem_config = UmemConfigBuilder::new()
+        ...
+    let socket_config = SocketConfigBuilder::new()
+        ...
+    let n_tx_frames = umem_config.frame_count() / 2;
+    let n_tx_batch_size = 1024;
+
+    let xsk = Xsk2::new(
+        &ifname,
+        0,
+        umem_config,
+        socket_config,
+        n_tx_frames as usize,
+        n_tx_batch_size,
+    )
+    .expect("failed to build xsk");
+    Box::into_raw(Box::new(xsk))
+}
+```
+
+## C FFI
+\small
+```
+#[no_mangle]
+pub unsafe extern "C" fn xsk_send(xsk_ptr: *mut Xsk2,
+    pkt: *const u8, len: size_t) {
+
+    let xsk = {
+        assert!(!xsk_ptr.is_null());
+        &mut *xsk_ptr
+    };
+
+    let pkt = {
+        assert!(!pkt.is_null());
+        slice::from_raw_parts(pkt, len as usize)
+    };
+
+    xsk.tx.send(&pkt).expect("failed to send pkt");
+}
+```
+
+## C FFI
+\small
+```
+#[no_mangle]
+pub unsafe extern "C" fn xsk_recv(xsk_ptr: *mut Xsk2,
+    pkt: *mut u8, len: size_t) -> u16 {
+
+    let xsk = {
+        assert!(!xsk_ptr.is_null());
+        &mut *xsk_ptr
+    };
+
+    let pkt = {
+        assert!(!pkt.is_null());
+        slice::from_raw_parts_mut(pkt, len as usize)
+    };
+
+    xsk.rx.recv(pkt) as u16
+}
+```
+
+## C FFI
+\tiny
+```
+int main() {
+    char* ifname = "veth0";
+    void* xsk = xsk_new(ifname);
+    uint16_t len_recvd;
+
+    int i, j;
+    int pkts_to_recv = 10;
+    size_t len = 1500;
+
+
+    for(i = 0; i < pkts_to_recv; i++) {
+        char buf[MAX_PKT_SIZE] = {0};
+        len_recvd = xsk_recv(xsk, &buf, len);
+        for(j = 0; j < len_recvd; j++) {
+            printf("0x%hhx,", buf[j]);
+        }
+        printf("\n");
+    }
+
+    char pkt_to_send[50] = {...};
+
+
+    for(i = 0; i < pkts_to_recv; i++) {
+        xsk_send(xsk, &pkt_to_send, 50);
+    }
+
+
+    xsk_delete(xsk);
+    return 0;
+}
+```
+
+## C FFI
+https://github.com/seeyarh/zmap/tree/feature/af_xdp
